@@ -65,6 +65,71 @@
 
 ---
 
+## 三之二、验证构建产物（重要，别跳过）
+
+**两个仓库必须构建出不同的镜像。** 配错规则会导致两个仓库都构建 app 镜像：
+
+- `geoflow-app` 应含 PHP-FPM（`/usr/local/sbin/php-fpm`）
+- `geoflow-web` 应含 Nginx（`/etc/nginx/`）
+
+构建完成后，在部署机上各拉一个检查：
+
+```bash
+# app 镜像：应该有 php-fpm，不该有 nginx
+docker run --rm --entrypoint sh <ACR地址>/kintreda/geoflow-app:3.1.0 \
+  -c 'which php-fpm; ls /etc/nginx 2>/dev/null || echo "无 nginx（正确）"'
+
+# web 镜像：应该有 nginx，不该有 php-fpm
+docker run --rm --entrypoint sh <ACR地址>/kintreda/geoflow-web:3.1.0 \
+  -c 'ls /etc/nginx | head -3; which php-fpm 2>/dev/null || echo "无 php-fpm（正确）"'
+```
+
+### 如果两个仓库构建出了同一个镜像
+
+**现象**：`geoflow-web:3.1.0` 里能查到 `php-fpm`，且体积与 app 镜像相同（673MB 而非 70MB）。
+
+**原因**：`geoflow-web` 仓库的构建规则「Dockerfile文件名」填的是 `Dockerfile`，
+两个仓库都指向了根目录的 app Dockerfile。
+
+**解决**：把 `geoflow-web` 仓库的规则改成指向 `Dockerfile.web`。两条路任选：
+
+**路线 A：修改现有规则（推荐）**
+镜像仓库 → geoflow-web → 构建 → 找到规则 → 操作列「修改」→ Dockerfile文件名 改为 `Dockerfile.web`。
+
+**路线 B：添加自定义规则**
+如果内置规则不可编辑（或改不了），在 geoflow-web 仓库点「添加规则」新建一条：
+
+| 配置项 | 填写值 |
+| --- | --- |
+| 类型 | Tag |
+| Branch/Tag | `release-v$version` |
+| 构建上下文目录 | `/` |
+| Dockerfile文件名 | `Dockerfile.web` |
+| 镜像版本 | `$version` |
+
+> 官方规则说明：「当存在代码 tag 为 1.2.3 的自定义构建规则时，以自定义构建规则为准」，
+> 所以自定义规则会覆盖内置规则的行为。
+
+**改完后必须提升版本号重新打 tag**（同名 tag 不会触发重建）：
+
+```bash
+VERSION=3.1.1 bash deploy-scripts/release-tag.sh
+```
+
+然后部署机 `.env` 里的镜像版本同步改成新版本号。
+
+### 个人版构建的两个硬约束
+
+| 约束 | 影响 |
+| --- | --- |
+| **构建超时 30 分钟** | app 镜像要编 6 个 PHP 扩展 + pecl redis + npm build，4 核机器本地构建约 25–40 分钟，**有超时风险** |
+| **只支持 amd64** | 需要 arm64 镜像时用 `deploy-scripts/release-images.sh` 或 GitHub Actions 手动构建 |
+
+> 30 分钟超时是个人版的限制。企业版有「灵活构建配置 / 自定义构建参数 / 多架构构建」，
+> 构建时间不受此限。若频繁超时，考虑升级企业版实例。
+
+---
+
 ## 四、发版
 
 ```bash
