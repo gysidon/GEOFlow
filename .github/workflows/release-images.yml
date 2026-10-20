@@ -1,32 +1,36 @@
 name: Release Images
 
-# 推送到工作分支或打 tag 时自动构建镜像并推送到阿里云 ACR。
-# 上游代码更新后，先执行 deploy-scripts/fork-sync-upstream.sh 同步到工作分支，
-# 推送触发本流水线。
+# 可选的备用构建链路。日常发版用 deploy-scripts/release-tag.sh 打 tag，
+# 由阿里云 ACR 内置规则自动构建——本 workflow 只在需要多架构
+# （amd64 + arm64）或想在 GitHub 上查看构建日志时启用。
+#
+# 触发方式刻意限定为手动：ACR 内置规则用 release-v$version 生成纯版本号 tag，
+# 本 workflow 用「版本号-短 commit」格式，两者同时自动跑会产生两套 tag 混淆。
 
 on:
-  push:
-    branches:
-      - custom
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       version:
         description: '镜像版本号（留空则取 version.json + 短 commit）'
         required: false
         type: string
+      platforms:
+        description: '目标架构，逗号分隔'
+        required: false
+        default: 'linux/amd64,linux/arm64'
+        type: string
 
 env:
   REGISTRY: registry.cn-chengdu.aliyuncs.com
-  NS: kintreda/geoflow
-  PLATFORMS: linux/amd64
+  NS: kintreda
+  REPO_APP: geoflow-app
+  REPO_WEB: geoflow-web
 
 jobs:
   build:
     name: 构建并推送镜像
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: 检出代码
@@ -63,11 +67,11 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.prod
-          platforms: ${{ env.PLATFORMS }}
+          platforms: ${{ inputs.platforms }}
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.NS }}/geoflow-app-prod:${{ steps.version.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.NS }}/geoflow-app-prod:latest
+            ${{ env.REGISTRY }}/${{ env.NS }}/${{ env.REPO_APP }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.NS }}/${{ env.REPO_APP }}:latest
           build-args: |
             COMPOSER_IMAGE=composer:2
             PHP_FPM_IMAGE=php:8.4-fpm-bookworm
@@ -78,11 +82,11 @@ jobs:
         with:
           context: .
           file: docker/nginx/Dockerfile.prod
-          platforms: ${{ env.PLATFORMS }}
+          platforms: ${{ inputs.platforms }}
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.NS }}/geoflow-web-prod:${{ steps.version.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.NS }}/geoflow-web-prod:latest
+            ${{ env.REGISTRY }}/${{ env.NS }}/${{ env.REPO_WEB }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.NS }}/${{ env.REPO_WEB }}:latest
           build-args: |
             NGINX_IMAGE=nginx:1.31.1-alpine
 
@@ -91,6 +95,6 @@ jobs:
           echo "### 镜像发布完成" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "GEOFLOW_APP_IMAGE=${{ env.REGISTRY }}/${{ env.NS }}/geoflow-app-prod:${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "GEOFLOW_WEB_IMAGE=${{ env.REGISTRY }}/${{ env.NS }}/geoflow-web-prod:${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "GEOFLOW_APP_IMAGE=${{ env.REGISTRY }}/${{ env.NS }}/${{ env.REPO_APP }}:${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "GEOFLOW_WEB_IMAGE=${{ env.REGISTRY }}/${{ env.NS }}/${{ env.REPO_WEB }}:${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"

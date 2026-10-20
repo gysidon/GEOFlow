@@ -10,26 +10,27 @@
 
 ```text
   上游仓库                     你的 Fork                    阿里云镜像仓库
-  yaojingang/GEOFlow  ──①sync──▶  gysidon/GEOFlow  ──②CI──▶  registry.cn-chengdu
-        ▲                              │                          .aliyuncs.com/kintreda/geoflow
-        │                              │③push                      │
-        └──────────────────────────────┘                          │④pull
-                                                                ▼
-                                                   目标服务器（任意）
-                                                   deploy/geoflow/
-                                                   ├── docker-compose.yml
-                                                   ├── .env
-                                                   └── storage/
+  yaojingang/GEOFlow  ──①sync──▶  gysidon/GEOFlow  ──②tag──▶  registry.cn-chengdu
+        ▲                              │                    .aliyuncs.com/kintreda
+        │                              │                    ├── geoflow-app
+        └──────────────────────────────┘                    └── geoflow-web
+                                                               │
+                                                               │③pull
+                                                               ▼
+                                                      目标服务器（任意）
+                                                      deploy/geoflow/
+                                                      ├── docker-compose.yml
+                                                      ├── .env
+                                                      └── storage/
 ```
 
-四个环节：
+三个环节：
 
 | 环节 | 动作 | 工具 |
 | --- | --- | --- |
 | ① 同步上游 | 拉取上游并合并到你的分支 | `deploy-scripts/fork-sync-upstream.sh` |
-| ② 构建镜像 | buildx 多架构构建并推送到 ACR | `.github/workflows/release-images.yml`（自动）或 `deploy-scripts/release-images.sh`（手动） |
-| ③ 推送代码 | 提交改动到你的 fork | `git push origin custom` |
-| ④ 部署运行 | 拉镜像 + 起服务 | `deploy/geoflow/docker-compose.yml` |
+| ② 构建镜像 | 打 `release-v$version` tag，ACR 自动构建 | `deploy-scripts/release-tag.sh`（或 ACR 控制台手动构建） |
+| ③ 部署运行 | 拉镜像 + 起服务 | `deploy/geoflow/docker-compose.yml` |
 
 ---
 
@@ -54,11 +55,69 @@ git checkout -b custom upstream/main
 
 1. 创建命名空间 `kintreda`（若已存在则跳过）
 2. 在命名空间下创建两个镜像仓库：
-   - `geoflow-app-prod`
-   - `geoflow-web-prod`
+   - `geoflow-app`
+   - `geoflow-web`
 3. 记录仓库类型：**个人版**（`registry.cn-chengdu.aliyuncs.com`）或**企业版**（`registry.cn-chengdu.cr.aliyuncs.com`）。本文档按个人版写，企业版需替换地址。
 
-### 2.3 配置 ACR 访问凭证
+> **为什么是两个仓库**：ACR 的构建规则是「一个镜像仓库 → 一条规则 → 一个镜像」。
+> GEOFlow 需要 app（PHP-FPM + 业务代码）和 web（Nginx + 前端静态资源）两个镜像，
+> 因此必须建两个仓库，各自配一条构建规则。
+>
+> 镜像地址格式为 `<ACR地址>/<命名空间>/<仓库名>:<版本>`，例如
+> `registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-app:3.1.0`。
+
+### 2.3 绑定代码源（ACR 自动构建的前提）
+
+ACR 要从 GitHub 拉代码，必须先绑定代码源：
+
+1. 控制台 → **仓库管理 → 代码源** → 找到 **GitHub** → 点击「绑定账号」
+2. 跳转到 GitHub 授权页，登录后点击 **Authorize AliyunDeveloper**
+3. 返回 ACR 控制台，GitHub 一行显示「已绑定」即成功
+
+> 个人版实例只支持绑定 **GitHub 个人版账号**（OAuth 授权）。
+> 绑定后 ACR 才能读取你 fork 仓库的代码与 tag。
+
+### 2.4 配置两个仓库的构建规则
+
+**ACR 个人版不提供代码源构建的公开 API，规则只能在控制台配置。** 两个仓库各配一条：
+
+#### 仓库 `geoflow-app`
+
+进入仓库详情 → 左侧 **构建** → **添加规则**：
+
+| 配置项 | 填写值 |
+| --- | --- |
+| 分支/标签 | `tags: release-v$version` |
+| 构建上下文目录 | `/` |
+| Dockerfile文件名 | `Dockerfile` |
+| 镜像版本 | `$version` |
+
+#### 仓库 `geoflow-web`
+
+| 配置项 | 填写值 |
+| --- | --- |
+| 分支/标签 | `tags: release-v$version` |
+| 构建上下文目录 | `/` |
+| Dockerfile文件名 | `Dockerfile.web` |
+| 镜像版本 | `$version` |
+
+**规则说明**：
+
+- `release-v$version` 是 ACR 的**内置正则规则**。源码 tag 为 `release-v3.1.0` 时，
+  ACR 自动构建出版本号为 `3.1.0` 的镜像。
+- `$version` 是命名捕获组，镜像 tag 直接取 tag 里 `release-v` 之后的部分。
+- **构建上下文目录必须是 `/`**：Dockerfile 里的 `COPY . .` 需要仓库根目录作为上下文。
+  根目录的 `Dockerfile` / `Dockerfile.web` 就是为此准备的入口文件。
+- 设置了正则规则后**仅支持系统自动构建**，不支持控制台的「立即构建」按钮——
+  想重新构建就换个版本号重新打 tag。
+
+> **关于两个入口 Dockerfile**：上游的 `docker/Dockerfile.prod` 与
+> `docker/nginx/Dockerfile.prod` 使用了 `RUN --mount=type=cache`（BuildKit 专属语法）。
+> ACR 的托管构建器不保证开启 BuildKit，保留会直接报 `unknown flag: mount` 导致构建失败。
+> 根目录的 `Dockerfile` 已去掉该语法，其余内容与上游一致。
+> 上游文件保持原样，供服务器本地构建与 GitHub Actions 使用。
+
+### 2.5 配置 ACR 访问凭证
 
 在控制台「实例列表 → 访问凭证」页面设置**固定密码**：
 
@@ -68,7 +127,13 @@ git checkout -b custom upstream/main
 
 记录下 `docker login` 命令中的用户名。若是 RAM 用户，格式为 `用户名@账号ID.onaliyun.com`。
 
-### 2.4 配置 GitHub Secrets（启用自动构建）
+> ACR 自动构建推送到自己的仓库**不需要**额外配置；
+> 这个凭证是给**部署服务器拉取私有镜像**用的。
+
+### 2.6 配置 GitHub Secrets（可选：启用 GitHub Actions 备用链路）
+
+ACR 内置规则已能覆盖日常发布。以下配置是**可选**的——如果你需要多架构
+（同时支持 amd64 与 arm64）或想在 GitHub 上看构建日志，再启用它。
 
 进入你的 fork 仓库 → **Settings → Secrets and variables → Actions → New repository secret**：
 
@@ -76,8 +141,6 @@ git checkout -b custom upstream/main
 | --- | --- |
 | `ACR_USERNAME` | ACR 访问凭证页显示的用户名 |
 | `ACR_PASSWORD` | 刚设置的固定密码 |
-
-配置后，推送到 `custom` 分支即自动构建并推送镜像。
 
 ---
 
@@ -93,14 +156,51 @@ git commit -m "feat: xxx"
 git push origin custom
 ```
 
-推送后 GitHub Actions 自动构建镜像（约 10–20 分钟），完成后在 Actions 页面能看到镜像地址。
+推送代码**不会**触发构建——ACR 内置规则只认 `release-v$version` 格式的 tag。
+日常开发推到 `custom` 分支即可，等要发版时再打 tag（见 3.2）。
 
-### 3.2 手动构建镜像（不依赖 CI）
+### 3.2 发版：打 tag 触发 ACR 自动构建
+
+```bash
+cd /path/to/GEOFlow
+
+# 预演（只打印不执行），确认版本号与 tag 正确
+DRY_RUN=1 bash deploy-scripts/release-tag.sh
+
+# 正式发版
+bash deploy-scripts/release-tag.sh
+```
+
+脚本做的事：
+
+1. 读 `version.json` 的 `version` 字段（或用 `VERSION=3.1.1` 覆盖）
+2. 检查工作区干净、tag 不重复、根目录 Dockerfile 存在
+3. 创建 tag `release-v<版本号>` 并推送到 `origin`
+
+推送后，ACR 立即开始构建，约 10–20 分钟后产出：
+
+```
+registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-app:3.1.0
+registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-web:3.1.0
+```
+
+**查看构建进度**：阿里云控制台 → 容器镜像服务 → 实例 → 镜像仓库 → 选中仓库 → **构建**。
+
+> **tag 与版本号是强绑定的**：ACR 用 `release-v$version` 捕获版本号，
+> 所以 tag 必须严格是 `release-v` + 纯数字版本号（如 `release-v3.1.0`）。
+> `release-v3.1.0-beta1` 这样的预发布 tag **不会**被规则匹配。
+> 想发预发布版，要么用纯数字版本号，要么临时在控制台手动构建。
+
+### 3.3 手动构建镜像（不依赖 ACR 与 CI）
+
+需要自定义 tag、多架构，或 ACR 构建失败需要重试时使用：
 
 ```bash
 # 单架构
 REGISTRY=registry.cn-chengdu.aliyuncs.com \
-NS=kintreda/geoflow \
+NS=kintreda \
+REPO_APP=geoflow-app \
+REPO_WEB=geoflow-web \
 REGISTRY_USER=<ACR用户名> \
 REGISTRY_PASS=<ACR密码> \
 bash deploy-scripts/release-images.sh
@@ -108,7 +208,7 @@ bash deploy-scripts/release-images.sh
 # 多架构（同时支持 amd64 与 arm64）
 PLATFORMS=linux/amd64,linux/arm64 \
 REGISTRY=registry.cn-chengdu.aliyuncs.com \
-NS=kintreda/geoflow \
+NS=kintreda \
 REGISTRY_USER=<ACR用户名> \
 REGISTRY_PASS=<ACR密码> \
 bash deploy-scripts/release-images.sh
@@ -116,7 +216,10 @@ bash deploy-scripts/release-images.sh
 
 版本号默认取 `version.json` 的版本 + 短 commit，例如 `3.1.0-a1b2c3d`。可用 `VERSION=` 覆盖。
 
-### 3.3 同步上游更新
+> 手动构建产出的是 `geoflow-app:3.1.0-a1b2c3d` 这种带 commit 的 tag，
+> 与 ACR 自动构建的纯版本号 tag 格式不同。部署时在 `.env` 里填实际存在的 tag 即可。
+
+### 3.4 同步上游更新
 
 ```bash
 # 先看看上游有什么新提交
@@ -132,7 +235,7 @@ bash deploy-scripts/fork-sync-upstream.sh
 - **检测到冲突会自动 `git merge --abort` 回滚并退出**，不会留下半拉倒状态
 - 合并成功后推送到 `origin/custom`
 
-同步完推送即触发 CI 重新构建镜像。
+同步完成后按 3.2 打 tag 即可触发构建。
 
 ---
 
@@ -281,17 +384,18 @@ redis-cli -h <REDIS_HOST> -n <REDIS_DB> DBSIZE   # 队列库应有 key 且数量
 有新版本时：
 
 ```bash
-# 1. 同步上游并推送（触发 CI 构建镜像）
+# 1. 同步上游并推送
 cd /path/to/GEOFlow
 bash deploy-scripts/fork-sync-upstream.sh
 
-# 2. 等 CI 构建完成，记下新版本号
+# 2. 打 tag 触发 ACR 构建（等约 10–20 分钟）
+bash deploy-scripts/release-tag.sh
 
 # 3. 目标服务器更新 .env 中的镜像版本
 cd /opt/geoflow
 vi .env
-#   GEOFLOW_APP_IMAGE=registry.cn-chengdu.aliyuncs.com/kintreda/geoflow/geoflow-app-prod:<新版本>
-#   GEOFLOW_WEB_IMAGE=registry.cn-chengdu.aliyuncs.com/kintreda/geoflow/geoflow-web-prod:<新版本>
+#   GEOFLOW_APP_IMAGE=registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-app:<新版本>
+#   GEOFLOW_WEB_IMAGE=registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-web:<新版本>
 
 # 4. 拉取新镜像
 docker compose --env-file .env pull
@@ -343,9 +447,12 @@ docker compose --env-file .env exec -T app php artisan up
 | `deploy/geoflow/docker-compose.yml` | 部署编排（自包含单文件，从 ACR 拉镜像，用外部 DB/Redis） |
 | `deploy/geoflow/.env.example` | 配置模板 |
 | `deploy/geoflow/README.md` | 本文 |
+| `Dockerfile` | **app 镜像的 ACR 构建入口**（去 BuildKit 语法，classic builder 可构建） |
+| `Dockerfile.web` | **web 镜像的 ACR 构建入口** |
+| `deploy-scripts/release-tag.sh` | 打 `release-v$version` tag 触发 ACR 自动构建 |
 | `deploy-scripts/fork-sync-upstream.sh` | 同步上游到 fork 分支 |
-| `deploy-scripts/release-images.sh` | 手动构建并推送镜像 |
-| `.github/workflows/release-images.yml` | 推送后自动构建镜像的 CI |
+| `deploy-scripts/release-images.sh` | 手动构建并推送镜像（支持多架构） |
+| `.github/workflows/release-images.yml` | 可选的 GitHub Actions 构建链路（多架构时用） |
 | `deploy-scripts/package-source-for-server.sh` | 打包源码（需要连同源码部署时用） |
 | `docs/deployment/EXTERNAL-DB-DEPLOYMENT.md` | 外部数据库部署详解（含踩坑记录） |
 

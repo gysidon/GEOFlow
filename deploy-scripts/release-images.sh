@@ -3,8 +3,11 @@
 # 构建 GEOFlow 生产镜像并推送到镜像仓库（默认阿里云 ACR）。
 #
 # 产出两个镜像：
-#   geoflow-app-prod  PHP 8.4 FPM + 业务代码 + Composer 依赖
-#   geoflow-web-prod  Nginx + 编译后的前端静态资源
+#   geoflow-app  PHP 8.4 FPM + 业务代码 + Composer 依赖
+#   geoflow-web  Nginx + 编译后的前端静态资源
+#
+# 说明：日常发版优先用 deploy-scripts/release-tag.sh（打 tag 让 ACR 自动构建）。
+# 本脚本用于需要自定义 tag、多架构（amd64 + arm64）或 ACR 构建失败时手动重试。
 #
 # 版本号策略：<version.json 版本>-<短 commit>，例如 3.1.0-a1b2c3d。
 # 同时打 :latest 便于快速部署，但生产环境建议在 .env 里锁定具体版本号，
@@ -12,7 +15,7 @@
 #
 # 用法：
 #   bash deploy-scripts/release-images.sh
-#   REGISTRY=registry.cn-chengdu.aliyuncs.com NS=kintreda/geoflow \
+#   REGISTRY=registry.cn-chengdu.aliyuncs.com NS=kintreda \
 #     bash deploy-scripts/release-images.sh
 #   PLATFORMS=linux/amd64,linux/arm64 bash deploy-scripts/release-images.sh
 #   VERSION=3.1.0-custom bash deploy-scripts/release-images.sh
@@ -20,7 +23,9 @@
 #
 # 环境变量：
 #   REGISTRY      镜像仓库地址，默认 registry.cn-chengdu.aliyuncs.com
-#   NS            命名空间（仓库路径），默认 kintreda/geoflow
+#   NS            命名空间，默认 kintreda
+#   REPO_APP      app 镜像仓库名，默认 geoflow-app
+#   REPO_WEB      web 镜像仓库名，默认 geoflow-web
 #   VERSION       镜像版本号，默认取 version.json + 短 commit
 #   PLATFORMS     多架构列表，默认 linux/amd64
 #   REGISTRY_USER 登录用户名（也可用 DOCKER_USERNAME）
@@ -34,7 +39,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 REGISTRY="${REGISTRY:-registry.cn-chengdu.aliyuncs.com}"
-NS="${NS:-kintreda/geoflow}"
+NS="${NS:-kintreda}"
+REPO_APP="${REPO_APP:-geoflow-app}"
+REPO_WEB="${REPO_WEB:-geoflow-web}"
 PLATFORMS="${PLATFORMS:-linux/amd64}"
 BUILDER_NAME="${BUILDER_NAME:-geoflow-builder}"
 SKIP_PUSH="${SKIP_PUSH:-0}"
@@ -87,8 +94,8 @@ except Exception:
 }
 
 VERSION="$(resolve_version)"
-APP_IMAGE="${REGISTRY}/${NS}/geoflow-app-prod:${VERSION}"
-WEB_IMAGE="${REGISTRY}/${NS}/geoflow-web-prod:${VERSION}"
+APP_IMAGE="${REGISTRY}/${NS}/${REPO_APP}:${VERSION}"
+WEB_IMAGE="${REGISTRY}/${NS}/${REPO_WEB}:${VERSION}"
 
 echo "=============================================="
 echo "  GEOFlow 镜像发布"
@@ -151,7 +158,7 @@ log "构建 app 镜像 (${PLATFORMS})"
 docker buildx build --platform "${PLATFORMS}" \
   -f docker/Dockerfile.prod \
   -t "${APP_IMAGE}" \
-  -t "${REGISTRY}/${NS}/geoflow-app-prod:latest" \
+  -t "${REGISTRY}/${NS}/${REPO_APP}:latest" \
   --build-arg COMPOSER_IMAGE="${COMPOSER_IMAGE}" \
   --build-arg PHP_FPM_IMAGE="${PHP_FPM_IMAGE}" \
   --build-arg PECL_REDIS_VERSION="${PECL_REDIS_VERSION}" \
@@ -165,7 +172,7 @@ log "构建 web 镜像 (${PLATFORMS})"
 docker buildx build --platform "${PLATFORMS}" \
   -f docker/nginx/Dockerfile.prod \
   -t "${WEB_IMAGE}" \
-  -t "${REGISTRY}/${NS}/geoflow-web-prod:latest" \
+  -t "${REGISTRY}/${NS}/${REPO_WEB}:latest" \
   --build-arg NGINX_IMAGE="${NGINX_IMAGE}" \
   ${push_flag} .
 
@@ -173,8 +180,8 @@ echo ""
 log "发布完成："
 echo "    ${APP_IMAGE}"
 echo "    ${WEB_IMAGE}"
-echo "    ${REGISTRY}/${NS}/geoflow-app-prod:latest"
-echo "    ${REGISTRY}/${NS}/geoflow-web-prod:latest"
+echo "    ${REGISTRY}/${NS}/${REPO_APP}:latest"
+echo "    ${REGISTRY}/${NS}/${REPO_WEB}:latest"
 echo ""
 echo ">>> 部署时在 .env 中锁定版本："
 echo "    GEOFLOW_APP_IMAGE=${APP_IMAGE}"

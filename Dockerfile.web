@@ -1,0 +1,47 @@
+# GEOFlow 生产 Web 镜像（Nginx + 前端静态资源）
+#
+# 用途：供阿里云 ACR「代码变更时自动构建镜像」使用，对应镜像仓库 geoflow-web。
+# ACR 构建规则填写：
+#   分支/标签：       tags: release-v$version
+#   构建上下文目录：   /
+#   Dockerfile文件名： Dockerfile.web
+#   镜像版本：       $version
+#
+# 与 docker/nginx/Dockerfile.prod 的差异：无（仅文件位置不同）。
+# 上游文件 docker/nginx/Dockerfile.prod 保持原样，供服务器本地构建与 GitHub Actions 使用。
+
+ARG NGINX_IMAGE=nginx:1.31.1-alpine
+
+FROM node:22-bookworm-slim AS assets
+
+WORKDIR /app
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ENV HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    NO_PROXY=${NO_PROXY}
+
+RUN npm config set registry https://registry.npmmirror.com/
+
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+COPY resources ./resources
+COPY public ./public
+COPY vite.config.js ./
+
+RUN npm run build
+
+FROM ${NGINX_IMAGE}
+
+WORKDIR /var/www/html
+
+COPY public /var/www/html/public
+COPY --from=assets /app/public/build /var/www/html/public/build
+COPY docker/nginx/default.conf.template /etc/nginx/templates/default.conf.template
+COPY docker/nginx/geoflow-app.conf /etc/nginx/snippets/geoflow-app.conf
+
+RUN rm -f /var/www/html/public/storage \
+    && ln -s ../storage/app/public /var/www/html/public/storage
