@@ -1,0 +1,96 @@
+name: Release Images
+
+# 推送到工作分支或打 tag 时自动构建镜像并推送到阿里云 ACR。
+# 上游代码更新后，先执行 deploy-scripts/fork-sync-upstream.sh 同步到工作分支，
+# 推送触发本流水线。
+
+on:
+  push:
+    branches:
+      - custom
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '镜像版本号（留空则取 version.json + 短 commit）'
+        required: false
+        type: string
+
+env:
+  REGISTRY: registry.cn-chengdu.aliyuncs.com
+  NS: kintreda/geoflow
+  PLATFORMS: linux/amd64
+
+jobs:
+  build:
+    name: 构建并推送镜像
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 登录阿里云镜像仓库
+        if: ${{ secrets.ACR_USERNAME != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: 设置 buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 解析镜像版本号
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
+          else
+            base=$(python3 -c "import json;print(json.load(open('version.json'))['version'])" 2>/dev/null || echo unknown)
+            short=$(git rev-parse --short HEAD)
+            version="${base}-${short}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "镜像版本: ${version}"
+
+      - name: 构建并推送 app 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.prod
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.NS }}/geoflow-app-prod:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.NS }}/geoflow-app-prod:latest
+          build-args: |
+            COMPOSER_IMAGE=composer:2
+            PHP_FPM_IMAGE=php:8.4-fpm-bookworm
+            PECL_REDIS_VERSION=6.3.0
+
+      - name: 构建并推送 web 镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/nginx/Dockerfile.prod
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.NS }}/geoflow-web-prod:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.NS }}/geoflow-web-prod:latest
+          build-args: |
+            NGINX_IMAGE=nginx:1.31.1-alpine
+
+      - name: 输出镜像地址
+        run: |
+          echo "### 镜像发布完成" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "GEOFLOW_APP_IMAGE=${{ env.REGISTRY }}/${{ env.NS }}/geoflow-app-prod:${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "GEOFLOW_WEB_IMAGE=${{ env.REGISTRY }}/${{ env.NS }}/geoflow-web-prod:${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,262 @@
+# GEOFlow 独立部署编排（从阿里云镜像仓库拉取镜像 + 复用外部 PostgreSQL/Redis）
+#
+# 用法：
+#   cd deploy/geoflow
+#   cp .env.example .env
+#   vi .env                      # 填数据库、Redis、域名
+#   docker compose --env-file .env pull
+#   docker compose --env-file .env up -d init
+#   docker compose --env-file .env up -d app web queue ai-quality-queue \
+#     ai-quality-backfill-queue ai-optimization-queue knowledge-queue scheduler reverb
+#
+# 本文件是自包含的单个编排文件：不含 postgres / redis 服务，数据库与 Redis 使用外部实例。
+# 镜像地址通过 GEOFLOW_APP_IMAGE / GEOFLOW_WEB_IMAGE 指定，默认指向阿里云镜像仓库。
+#
+# 前置条件：
+#   1. 目标服务器能访问 registry.cn-chengdu.aliyuncs.com（拉取镜像）；
+#   2. 目标 PostgreSQL 已安装 pgvector 扩展并在目标库执行过 CREATE EXTENSION vector；
+#   3. 目标 PostgreSQL / Redis 从本机网络可达（见 .env.example 注释）。
+#
+# 本文件由 fork 仓库 deploy/geoflow/ 维护，源项目上游为 yaojingang/GEOFlow。
+
+name: ${COMPOSE_PROJECT_NAME:-geoflow}
+
+x-app-image: &app-image ${GEOFLOW_APP_IMAGE:?GEOFLOW_APP_IMAGE 必须在 .env 中指定镜像地址}
+
+services:
+  # ---------------------------------------------------------------------------
+  # 一次性初始化：等待外部数据库就绪 → 执行迁移 → 首次安装 → 缓存配置
+  # ---------------------------------------------------------------------------
+  init:
+    image: *app-image
+    container_name: ${COMPOSE_PROJECT_NAME:-geoflow}-init
+    working_dir: /var/www/html
+    env_file:
+      - ./.env
+    environment:
+      AUTO_FIX_STORAGE_PERMISSIONS: "${AUTO_FIX_STORAGE_PERMISSIONS:-true}"
+      # 首次安装的安全门禁开关。新装空库必须为 true；已有数据的实例升级时
+      # 改为 false 并按 README 的升级流程走排空确认。
+      GEOFLOW_SECURITY_FRESH_INSTALL_CONFIRMED: "${GEOFLOW_SECURITY_FRESH_INSTALL_CONFIRMED:-true}"
+    command: ["php", "artisan", "about"]
+    volumes:
+      - ./.env:/var/www/html/.env
+      - ./storage:/var/www/html/storage
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # 应用主进程：PHP-FPM，处理 HTTP 请求
+  # ---------------------------------------------------------------------------
+  app:
+    image: *app-image
+    container_name: ${COMPOSE_PROJECT_NAME:-geoflow}-app
+    mem_limit: ${APP_CONTAINER_MEMORY_LIMIT:-768m}
+    working_dir: /var/www/html
+    environment:
+      AUTO_FIX_STORAGE_PERMISSIONS: "false"
+    volumes:
+      - ./.env:/var/www/html/.env
+      - ./storage:/var/www/html/storage
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "php-fpm -t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 入口：Nginx + 前端静态资源，唯一对外暴露端口
+  # ---------------------------------------------------------------------------
+  web:
+    image: ${GEOFLOW_WEB_IMAGE:?GEOFLOW_WEB_IMAGE 必须在 .env 中指定镜像地址}
+    container_name: ${COMPOSE_PROJECT_NAME:-geoflow}-web
+    ports:
+      - "${WEB_PORT:-18080}:80"
+    environment:
+      GEOFLOW_NGINX_PRIMARY_HOST: "${GEOFLOW_NGINX_PRIMARY_HOST:?必须设置}"
+      GEOFLOW_NGINX_PRIMARY_ALIASES: "${GEOFLOW_NGINX_PRIMARY_ALIASES:-}"
+      GEOFLOW_NGINX_HOSTED_ROOT_DOMAIN: "${GEOFLOW_NGINX_HOSTED_ROOT_DOMAIN:-invalid}"
+      GEOFLOW_NGINX_PUBLIC_SCHEME: "${GEOFLOW_NGINX_PUBLIC_SCHEME:-http}"
+      GEOFLOW_NGINX_PUBLIC_PORT: "${GEOFLOW_NGINX_PUBLIC_PORT:-80}"
+    volumes:
+      - ./storage:/var/www/html/storage:ro
+    depends_on:
+      app:
+        condition: service_started
+      reverb:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --header='Host: $${GEOFLOW_NGINX_PRIMARY_HOST}' -O /dev/null http://127.0.0.1/up || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 主队列：文章生成 / 分发 / 主题复刻 / 系统更新
+  # ---------------------------------------------------------------------------
+  queue:
+    image: *app-image
+    container_name: ${COMPOSE_PROJECT_NAME:-geoflow}-queue
+    working_dir: /var/www/html
+    environment:
+      AUTO_FIX_STORAGE_PERMISSIONS: "false"
+    command: ["php", "-d", "memory_limit=256M", "artisan", "queue:work", "redis", "--queue=system-updates,geoflow,distribution,theme-replication,default", "--sleep=1", "--tries=1", "--timeout=930", "--memory=128", "--max-jobs=100", "--max-time=3600"]
+    mem_limit: ${QUEUE_CONTAINER_MEMORY_LIMIT:-384m}
+    stop_grace_period: 960s
+    volumes:
+      - ./.env:/var/www/html/.env
+      - ./storage:/var/www/html/storage
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # AI 质检（前台）：并发数通过 AI_QUALITY_QUEUE_REPLICAS 调整
+  # ---------------------------------------------------------------------------
+  ai-quality-queue:
+    image: *app-image
+    working_dir: /var/www/html
+    environment:
+      AUTO_FIX_STORAGE_PERMISSIONS: "false"
+    command: ["php", "-d", "memory_limit=256M", "artisan", "geoflow:work-ai-quality", "front"]
+    mem_limit: ${AI_QUALITY_QUEUE_CONTAINER_MEMORY_LIMIT:-384m}
+    stop_grace_period: ${GEOFLOW_AI_QUALITY_STOP_GRACE_PERIOD:-260s}
+    volumes:
+      - ./.env:/var/www/html/.env
+      - ./storage:/var/www/html/storage
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    deploy:
+      replicas: ${AI_QUALITY_QUEUE_REPLICAS:-1}
+
+  # ---------------------------------------------------------------------------
+  # AI 质检（回填）：后台低优先级任务
+  # ---------------------------------------------------------------------------
+  ai-quality-backfill-queue:
+    image: *app-image
+    container_name: ${COMPOSE_PROJECT_NAME:-geoflow}-ai-quality-backfill-queue
+    working_dir: /var/www/html
+    environment:
+      AUTO_FIX_STORAGE_PERMISSIONS: "false"
+    command: ["php", "-d", "memory_limit=192M", "artisan", "geoflow:work-ai-quality", "backfill"]
+    mem_limit: ${AI_QUALITY_BACKFILL_QUEUE_CONTAINER_MEMORY_LIMIT:-256m}
+    stop_grace_period: ${GEOFLOW_AI_QUALITY_STOP_GRACE_PERIOD:-260s}
+    volumes:
+      - ./.env:/var/www/html/.env
+      - ./storage:/var/www/html/storage
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # AI 内容优化：单任务最长 850 秒，独立进程避免拖慢主队列
+  # ---------------------------------------------------------------------------
+  ai-optimization-queue:
+    image: *app-image
+    container_name: ${COMPOSE_PROJECT_NAME:-geoflow}-ai-optimization-queue
+    working_dir: /var/www/html
+    environment:
+      AUTO_FIX_STORAGE_PERMISSIONS: "false"
+    command: ["php", "-d", "memory_limit=256M", "artisan", "geoflow:work-ai-optimization"]
+    mem_limit: ${AI_OPTIMIZATION_QUEUE_CONTAINER_MEMORY_LIMIT:-384m}
+    stop_grace_period: ${GEOFLOW_AI_QUALITY_OPTIMIZATION_STOP_GRACE_PERIOD:-910s}
+    volumes:
+      - ./.env:/var/www/html/.env
+      - ./storage:/var/www/html/storage
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 知识库：解析与向量化，独立队列
+  # ---------------------------------------------------------------------------
+  knowledge-queue:
+    image: *app-image
+    container_name: ${COMPOSE_PROJECT_NAME:-geoflow}-knowledge-queue
+    working_dir: /var/www/html
+    environment:
+      AUTO_FIX_STORAGE_PERMISSIONS: "false"
+    command: ["php", "-d", "memory_limit=160M", "artisan", "queue:work", "redis", "--queue=knowledge", "--sleep=1", "--tries=1", "--timeout=210", "--memory=128", "--max-jobs=20", "--max-time=1800"]
+    mem_limit: ${KNOWLEDGE_QUEUE_CONTAINER_MEMORY_LIMIT:-256m}
+    stop_grace_period: 240s
+    volumes:
+      - ./.env:/var/www/html/.env
+      - ./storage:/var/www/html/storage
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 定时任务调度
+  # ---------------------------------------------------------------------------
+  scheduler:
+    image: *app-image
+    container_name: ${COMPOSE_PROJECT_NAME:-geoflow}-scheduler
+    working_dir: /var/www/html
+    environment:
+      AUTO_FIX_STORAGE_PERMISSIONS: "false"
+    command: ["php", "artisan", "schedule:work"]
+    volumes:
+      - ./.env:/var/www/html/.env
+      - ./storage:/var/www/html/storage
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # WebSocket 广播服务（Reverb）
+  # ---------------------------------------------------------------------------
+  reverb:
+    image: *app-image
+    container_name: ${COMPOSE_PROJECT_NAME:-geoflow}-reverb
+    working_dir: /var/www/html
+    environment:
+      AUTO_FIX_STORAGE_PERMISSIONS: "false"
+    command: ["php", "artisan", "reverb:start", "--host=0.0.0.0"]
+    expose:
+      - "${REVERB_SERVER_PORT:-18080}"
+    volumes:
+      - ./.env:/var/www/html/.env
+      - ./storage:/var/www/html/storage
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+networks:
+  default:
+    name: ${DOCKER_NETWORK_NAME:-geoflow-net}
+    ipam:
+      config:
+        # 避开 VPC 172.16.0.0/12，避免容器路由与内网地址冲突。
+        - subnet: ${DOCKER_NETWORK_SUBNET:-10.88.0.0/16}
+          gateway: ${DOCKER_NETWORK_GATEWAY:-10.88.0.1}

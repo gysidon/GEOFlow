@@ -1,0 +1,75 @@
+# 复用宿主机已有 PostgreSQL / Redis 的 override 编排层。
+#
+# 叠加在 docker-compose.prod.yml（服务器本地构建）或 docker-compose.prebuilt.yml（服务器只拉镜像）之上使用：
+#   docker compose --env-file .env.prod \
+#     -f docker-compose.prod.yml \
+#     -f docker-compose.external-db.yml \
+#     build
+#   docker compose --env-file .env.prod \
+#     -f docker-compose.prod.yml \
+#     -f docker-compose.external-db.yml \
+#     up -d
+#
+# 作用：
+#   1. 移除 compose 内置的 postgres / redis 容器，改为连接宿主机或远端已有实例；
+#   2. 清理指向这两个容器的 depends_on 引用（否则 Compose 报 "depends on undefined service"）；
+#   3. 为应用侧容器注入 host.docker.internal（Linux 下解析到宿主机网关），便于直接连宿主机实例。
+#
+# 数据库与 Redis 的地址、端口、账号密码全部来自 .env.prod，本文件不硬编码任何凭据。
+# 详见 docs/deployment/EXTERNAL-DB-DEPLOYMENT.md。
+
+x-external-db-hosts: &external-db-hosts
+  - "host.docker.internal:host-gateway"
+
+services:
+  # 内置数据库容器整体移除。!reset null 让 Compose 忽略基座文件中的服务定义。
+  postgres: !reset null
+  redis: !reset null
+
+  # init 原本等待 postgres / redis 健康检查；改由 entrypoint 的 pg_isready 轮询外部实例
+  # （AUTO_WAIT_FOR_DB=true，见 docker/entrypoint.prod.sh）。
+  init:
+    extra_hosts: *external-db-hosts
+    depends_on: !override {}
+
+  app:
+    extra_hosts: *external-db-hosts
+
+  queue:
+    extra_hosts: *external-db-hosts
+    depends_on: !override
+      init:
+        condition: service_completed_successfully
+
+  ai-quality-queue:
+    extra_hosts: *external-db-hosts
+    depends_on: !override
+      init:
+        condition: service_completed_successfully
+
+  ai-quality-backfill-queue:
+    extra_hosts: *external-db-hosts
+    depends_on: !override
+      init:
+        condition: service_completed_successfully
+
+  ai-optimization-queue:
+    extra_hosts: *external-db-hosts
+    depends_on: !override
+      init:
+        condition: service_completed_successfully
+
+  knowledge-queue:
+    extra_hosts: *external-db-hosts
+    depends_on: !override
+      init:
+        condition: service_completed_successfully
+
+  scheduler:
+    extra_hosts: *external-db-hosts
+
+  reverb:
+    extra_hosts: *external-db-hosts
+    depends_on: !override
+      init:
+        condition: service_completed_successfully
