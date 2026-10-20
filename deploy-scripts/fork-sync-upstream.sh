@@ -63,10 +63,32 @@ fi
 # ---------------------------------------------------------------------------
 # 2. 拉取上游
 # ---------------------------------------------------------------------------
-log "拉取上游: ${UPSTREAM_REPO}"
-if ! git fetch upstream --tags --prune; then
+# GitHub 在弱网环境下 fetch 容易中断，这里做多策略重试：
+#   ① 标准 fetch（完整历史）
+#   ② 浅 fetch（--depth，降低传输量）
+#   ③ 浅 fetch 单分支（最小传输量）
+fetch_upstream() {
+  local attempt
+  for attempt in 1 2 3; do
+    log "拉取上游（第 ${attempt}/3 次尝试）: ${UPSTREAM_REPO}"
+    if git fetch upstream --tags --prune; then
+      return 0
+    fi
+    warn "第 ${attempt} 次拉取失败，10 秒后重试。"
+    sleep 10
+  done
+
+  log "改用浅克隆模式拉取（传输量更小，适合弱网）"
+  if git fetch --depth=50 upstream main 2>/dev/null \
+     || git fetch --depth=10 upstream main 2>/dev/null; then
+    warn "已用浅模式拉到上游，合并历史可能不完整。恢复网络后建议重新完整同步。"
+    return 0
+  fi
+
   fail "拉取上游失败。检查网络或 SSH 密钥配置（ssh -T git@github.com）。"
-fi
+}
+
+fetch_upstream
 
 upstream_ref="upstream/main"
 if ! git rev-parse --verify "${upstream_ref}" >/dev/null 2>&1; then
