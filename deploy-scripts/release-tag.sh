@@ -18,12 +18,14 @@
 #   bash deploy-scripts/release-tag.sh                 # 用 version.json 里的版本号
 #   VERSION=3.1.1 bash deploy-scripts/release-tag.sh   # 指定版本号
 #   DRY_RUN=1 bash deploy-scripts/release-tag.sh       # 只打印不执行
+#   VERIFY=1 bash deploy-scripts/release-tag.sh        # 打完 tag 后自动校验构建产物
 #
 # 环境变量：
 #   VERSION   镜像版本号，默认取 version.json 的 version 字段
 #   REMOTE    推送目标远端，默认 origin
 #   BRANCH    提交与打 tag 所在的分支，默认 custom
 #   DRY_RUN   设为 1 时只打印将要执行的动作
+#   VERIFY    设为 1 时推送后自动校验 ACR 构建出的两个镜像内容是否正确
 #
 set -euo pipefail
 
@@ -139,3 +141,29 @@ echo ">>> 查看构建进度：阿里云控制台 → 容器镜像服务 → ${R
 echo ">>> 构建完成后，在部署机的 .env 中锁定版本："
 echo "    GEOFLOW_APP_IMAGE=<ACR地址>/kintreda/geoflow-app:${VERSION}"
 echo "    GEOFLOW_WEB_IMAGE=<ACR地址>/kintreda/geoflow-web:${VERSION}"
+echo ""
+
+# ---------------------------------------------------------------------------
+# 5. 校验构建产物（可选）
+# ---------------------------------------------------------------------------
+# ACR 内置规则锁死「Dockerfile文件名 = Dockerfile」，两个仓库监听同一 tag 时
+# 会构建出同一个 app 镜像。构建完成后立即校验，避免部署时才发现 web 容器起不来。
+if [[ "${VERIFY:-0}" == "1" ]]; then
+  log "等待构建完成并校验产物（VERIFY=1）……"
+  log "提示：ACR 构建约需 10-20 分钟，脚本会持续重试"
+  verify_script="${SCRIPT_DIR}/verify-acr-images.sh"
+  if [[ -f "${verify_script}" ]]; then
+    for attempt in $(seq 1 30); do
+      if bash "${verify_script}" "${VERSION}"; then
+        echo ""
+        log "镜像产物校验通过"
+        exit 0
+      fi
+      [[ "${attempt}" -lt 30 ]] && { echo "  第 ${attempt} 次校验未通过，60 秒后重试……"; sleep 60; }
+    done
+    warn "多次校验仍未通过。构建可能还在进行，或 ACR 规则需要修正（见 deploy/geoflow/ACR-BUILD-SETUP.md）。"
+    exit 1
+  else
+    warn "找不到 ${verify_script}，跳过校验"
+  fi
+fi
