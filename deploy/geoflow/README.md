@@ -29,7 +29,7 @@
 | 环节 | 动作 | 工具 |
 | --- | --- | --- |
 | ① 同步上游 | 拉取上游并合并到你的分支 | `deploy-scripts/fork-sync-upstream.sh` |
-| ② 构建镜像 | 打 `release-v$version` tag，ACR 自动构建 | `deploy-scripts/release-tag.sh`（或 ACR 控制台手动构建） |
+| ② 构建镜像 | 打 `v$version` tag，ACR 自动构建 | `deploy-scripts/release-tag.sh`（或 ACR 控制台手动构建） |
 | ③ 部署运行 | 拉镜像 + 起服务 | `deploy/geoflow/docker-compose.yml` |
 
 ---
@@ -64,7 +64,7 @@ git checkout -b custom upstream/main
 > 因此必须建两个仓库，各自配一条构建规则。
 >
 > 镜像地址格式为 `<ACR地址>/<命名空间>/<仓库名>:<版本>`，例如
-> `registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-app:3.1.0`。
+> `registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-app:latest`。
 
 ### 2.3 绑定代码源（ACR 自动构建的前提）
 
@@ -87,25 +87,24 @@ ACR 要从 GitHub 拉代码，必须先绑定代码源：
 
 | 配置项 | 填写值 |
 | --- | --- |
-| 分支/标签 | `tags: release-v$version` |
+| 分支/标签 | `tags: v$version` |
 | 构建上下文目录 | `/` |
 | Dockerfile文件名 | `Dockerfile` |
-| 镜像版本 | `$version` |
+| 镜像版本 | `latest` |
 
 #### 仓库 `geoflow-web`
 
 | 配置项 | 填写值 |
 | --- | --- |
-| 分支/标签 | `tags: release-v$version` |
+| 分支/标签 | `tags: v$version` |
 | 构建上下文目录 | `/` |
 | Dockerfile文件名 | `Dockerfile.web` |
-| 镜像版本 | `$version` |
+| 镜像版本 | `latest` |
 
 **规则说明**：
 
-- `release-v$version` 是 ACR 的**内置正则规则**。源码 tag 为 `release-v3.1.0` 时，
-  ACR 自动构建出版本号为 `3.1.0` 的镜像。
-- `$version` 是命名捕获组，镜像 tag 直接取 tag 里 `release-v` 之后的部分。
+- `v$version` 是**自定义规则**的触发正则，用来避开内置 `release-v*` 规则（内置规则锁死 Dockerfile 文件名，无法产出正确的 web 镜像）。
+- 镜像版本在控制台固定填 `latest`，产物统一为 `:latest`（个人版自定义规则不支持 `$version` 捕获）。
 - **构建上下文目录必须是 `/`**：Dockerfile 里的 `COPY . .` 需要仓库根目录作为上下文。
   根目录的 `Dockerfile` / `Dockerfile.web` 就是为此准备的入口文件。
 - 设置了正则规则后**仅支持系统自动构建**，不支持控制台的「立即构建」按钮——
@@ -156,7 +155,7 @@ git commit -m "feat: xxx"
 git push origin custom
 ```
 
-推送代码**不会**触发构建——ACR 内置规则只认 `release-v$version` 格式的 tag。
+推送代码**不会**触发构建——自定义规则只认 `v$version` 格式的 tag（内置 `release-v*` 规则已被绕开，不会触发）。
 日常开发推到 `custom` 分支即可，等要发版时再打 tag（见 3.2）。
 
 ### 3.2 发版：打 tag 触发 ACR 自动构建
@@ -175,20 +174,19 @@ bash deploy-scripts/release-tag.sh
 
 1. 读 `version.json` 的 `version` 字段（或用 `VERSION=3.1.1` 覆盖）
 2. 检查工作区干净、tag 不重复、根目录 Dockerfile 存在
-3. 创建 tag `release-v<版本号>` 并推送到 `origin`
+3. 创建 tag `v<版本号>` 并推送到 `origin`
 
 推送后，ACR 立即开始构建，约 10–20 分钟后产出：
 
 ```
-registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-app:3.1.0
-registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-web:3.1.0
+registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-app:latest
+registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-web:latest
 ```
 
 **查看构建进度**：阿里云控制台 → 容器镜像服务 → 实例 → 镜像仓库 → 选中仓库 → **构建**。
 
-> **tag 与版本号是强绑定的**：ACR 用 `release-v$version` 捕获版本号，
-> 所以 tag 必须严格是 `release-v` + 纯数字版本号（如 `release-v3.1.0`）。
-> `release-v3.1.0-beta1` 这样的预发布 tag **不会**被规则匹配。
+> **tag 只用于触发、不携带版本号**：自定义规则镜像版本固定 `latest`，
+> 所以 tag 用 `v` + 纯数字版本号（如 `v3.1.0`）触发即可，`v3.1.0-beta1` 不会匹配。
 > 想发预发布版，要么用纯数字版本号，要么临时在控制台手动构建。
 
 ### 3.3 手动构建镜像（不依赖 ACR 与 CI）
@@ -216,7 +214,7 @@ bash deploy-scripts/release-images.sh
 
 版本号默认取 `version.json` 的版本 + 短 commit，例如 `3.1.0-a1b2c3d`。可用 `VERSION=` 覆盖。
 
-> 手动构建产出的是 `geoflow-app:3.1.0-a1b2c3d` 这种带 commit 的 tag，
+> 手动构建产出的是 `geoflow-app:latest-a1b2c3d` 这种带 commit 的 tag，
 > 与 ACR 自动构建的纯版本号 tag 格式不同。部署时在 `.env` 里填实际存在的 tag 即可。
 
 ### 3.4 同步上游更新
@@ -449,7 +447,7 @@ docker compose --env-file .env exec -T app php artisan up
 | `deploy/geoflow/README.md` | 本文 |
 | `Dockerfile` | **app 镜像的 ACR 构建入口**（去 BuildKit 语法，classic builder 可构建） |
 | `Dockerfile.web` | **web 镜像的 ACR 构建入口** |
-| `deploy-scripts/release-tag.sh` | 打 `release-v$version` tag 触发 ACR 自动构建 |
+| `deploy-scripts/release-tag.sh` | 打 `v$version` tag 触发 ACR 自动构建 |
 | `deploy-scripts/fork-sync-upstream.sh` | 同步上游到 fork 分支 |
 | `deploy-scripts/release-images.sh` | 手动构建并推送镜像（支持多架构） |
 | `.github/workflows/release-images.yml` | 可选的 GitHub Actions 构建链路（多架构时用） |

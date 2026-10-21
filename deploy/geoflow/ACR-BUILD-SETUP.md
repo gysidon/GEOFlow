@@ -42,24 +42,24 @@
 
 | 配置项 | 填写值 |
 | --- | --- |
-| 分支/标签 | `tags: release-v$version` |
+| 分支/标签 | `tags: v$version` |
 | 构建上下文目录 | `/` |
 | Dockerfile文件名 | `Dockerfile` |
-| 镜像版本 | `$version` |
+| 镜像版本 | `latest` |
 
 ### 仓库 `geoflow-web`
 
 | 配置项 | 填写值 |
 | --- | --- |
-| 分支/标签 | `tags: release-v$version` |
+| 分支/标签 | `tags: v$version` |
 | 构建上下文目录 | `/` |
 | Dockerfile文件名 | `Dockerfile.web` |
-| 镜像版本 | `$version` |
+| 镜像版本 | `latest` |
 
 ### 规则含义
 
-- `release-v$version` 是 ACR 内置正则。源码 tag 为 `release-v3.1.0` → 自动构建出 `3.1.0` 版本镜像。
-- `$version` 是命名捕获组，镜像 tag 取 tag 中 `release-v` 之后的部分。
+- `v$version` 是**自定义规则**的触发正则，用来避开内置的 `release-v*` 规则（内置规则锁死 Dockerfile 文件名，无法产出正确的 web 镜像）。
+- 源码打 `v3.1.0` 这类 tag 时触发构建；**镜像版本在控制台固定填 `latest`**（个人版自定义规则不支持 `$version` 捕获，所以产物统一是 `:latest`）。
 - **构建上下文目录必须是 `/`**：Dockerfile 里的 `COPY . .` 需要仓库根目录作为上下文。
 - 配了正则后仅支持系统自动构建，控制台的「立即构建」按钮不可用。
 
@@ -76,17 +76,17 @@
 
 ```bash
 # app 镜像：应该有 php-fpm，不该有 nginx
-docker run --rm --entrypoint sh <ACR地址>/kintreda/geoflow-app:3.1.0 \
+docker run --rm --entrypoint sh <ACR地址>/kintreda/geoflow-app:latest \
   -c 'which php-fpm; ls /etc/nginx 2>/dev/null || echo "无 nginx（正确）"'
 
 # web 镜像：应该有 nginx，不该有 php-fpm
-docker run --rm --entrypoint sh <ACR地址>/kintreda/geoflow-web:3.1.0 \
+docker run --rm --entrypoint sh <ACR地址>/kintreda/geoflow-web:latest \
   -c 'ls /etc/nginx | head -3; which php-fpm 2>/dev/null || echo "无 php-fpm（正确）"'
 ```
 
 ### 如果两个仓库构建出了同一个镜像
 
-**现象**：`geoflow-web:3.1.0` 里能查到 `php-fpm`，且体积与 app 镜像相同（673MB 而非 70MB）。
+**现象**：`geoflow-web:latest` 里能查到 `php-fpm`，且体积与 app 镜像相同（673MB 而非 70MB）。
 
 **原因**：`geoflow-web` 仓库的构建规则「Dockerfile文件名」填的是 `Dockerfile`，
 两个仓库都指向了根目录的 app Dockerfile。
@@ -102,10 +102,10 @@ docker run --rm --entrypoint sh <ACR地址>/kintreda/geoflow-web:3.1.0 \
 | 配置项 | 填写值 |
 | --- | --- |
 | 类型 | Tag |
-| Branch/Tag | `release-v$version` |
+| Branch/Tag | `v$version` |
 | 构建上下文目录 | `/` |
 | Dockerfile文件名 | `Dockerfile.web` |
-| 镜像版本 | `$version` |
+| 镜像版本 | `latest` |
 
 > 官方规则说明：「当存在代码 tag 为 1.2.3 的自定义构建规则时，以自定义构建规则为准」，
 > 所以自定义规则会覆盖内置规则的行为。
@@ -116,7 +116,7 @@ docker run --rm --entrypoint sh <ACR地址>/kintreda/geoflow-web:3.1.0 \
 VERSION=3.1.1 bash deploy-scripts/release-tag.sh
 ```
 
-然后部署机 `.env` 里的镜像版本同步改成新版本号。
+然后部署机 `.env` 里的镜像版本同步锁为 `latest`（自定义规则产物固定 `latest`）。
 
 ### 个人版构建的两个硬约束
 
@@ -137,13 +137,13 @@ cd /path/to/GEOFlow
 bash deploy-scripts/release-tag.sh
 ```
 
-脚本会打 `release-v<版本号>` tag 并推送到 `origin`，ACR 随即开始构建。
+脚本会打 `v<版本号>` tag 并推送到 `origin`，ACR 随即开始构建（自定义规则触发，产物为 `:latest`）。
 
 **产出镜像**：
 
 ```
-registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-app:3.1.0
-registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-web:3.1.0
+registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-app:latest
+registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-web:latest
 ```
 
 **查看构建进度**：镜像仓库 → 选中仓库 → 左侧「构建」。
@@ -168,7 +168,7 @@ docker compose --env-file .env pull
 | tag 推送后无构建记录 | 代码源未绑定 GitHub | 回第一节检查绑定状态 |
 | 构建日志报 `unknown flag: mount` | Dockerfile 用了 BuildKit 专属语法 | 用仓库根目录的 `Dockerfile`（已去掉该语法），不要直接用 `docker/Dockerfile.prod` |
 | 构建日志报 `Dockerfile not found` | 构建上下文目录或 Dockerfile 文件名填错 | 上下文填 `/`，app 填 `Dockerfile`、web 填 `Dockerfile.web` |
-| 镜像 tag 与预期不符 | `$version` 捕获的是 tag 里 `release-v` 之后的部分 | 确认 tag 严格是 `release-v` + 纯数字版本号 |
-| 预发布 tag 不触发构建 | `release-v3.1.0-beta1` 匹配不上 `$version` | 预发布版用纯数字版本号，或控制台手动构建 |
+| 镜像 tag 始终是 latest | 自定义规则镜像版本固定填了 `latest`，不随 tag 变 | 符合预期；部署机 `.env` 直接锁 `:latest` 即可 |
+| 预发布 tag 不触发构建 | `v3.1.0-beta1` 匹配不上 `v$version` | 预发布版用纯数字版本号，或控制台手动构建 |
 | 部署时 `manifest unknown` | 版本号写错或镜像没构建出来 | 核对 ACR 控制台实际产出的 tag |
 | 拉镜像 401 | 私有仓库未登录 | `docker login --username=<用户名> registry.cn-chengdu.aliyuncs.com` |

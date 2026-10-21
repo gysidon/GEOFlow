@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
-# 发布 GEOFlow 新版本：打 release-v$version tag 并推送到 fork 仓库，
+# 发布 GEOFlow 新版本：打 v$version tag 并推送到 fork 仓库，
 # 由阿里云 ACR 的「代码变更时自动构建镜像」规则自动构建两个镜像。
 #
 # ACR 内置构建规则（每个镜像仓库各配一条）：
-#   分支/标签：       tags: release-v$version
+#   分支/标签：       tags: v$version
 #   构建上下文目录：   /
 #   Dockerfile文件名： Dockerfile        （app 仓库）
 #                    Dockerfile.web     （web 仓库）
 #   镜像版本：       $version
 #
-# 触发效果：源码 tag 为 release-v3.1.0 时，ACR 自动构建出 3.1.0 版本的镜像。
+# 触发效果：源码 tag 为 v3.1.0 时，ACR 自定义规则（镜像版本固定 latest）自动构建镜像。
 #   registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-app:3.1.0
 #   registry.cn-chengdu.aliyuncs.com/kintreda/geoflow-web:3.1.0
 #
@@ -55,7 +55,7 @@ fi
 # 只允许数字与点，避免 tag 名非法
 [[ "${VERSION}" =~ ^[0-9]+(\.[0-9]+)*$ ]] || fail "版本号格式非法: ${VERSION}（只允许数字和点，如 3.1.0）"
 
-TAG="release-v${VERSION}"
+TAG="v${VERSION}"
 
 # ---------------------------------------------------------------------------
 # 2. 前置检查
@@ -114,8 +114,8 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   echo "  git push ${REMOTE} ${TAG}"
   echo ""
   log "预期产出的镜像："
-  echo "  <ACR地址>/kintreda/geoflow-app:${VERSION}"
-  echo "  <ACR地址>/kintreda/geoflow-web:${VERSION}"
+  echo "  <ACR地址>/kintreda/geoflow-app:latest"
+  echo "  <ACR地址>/kintreda/geoflow-web:latest"
   exit 0
 fi
 
@@ -134,20 +134,20 @@ fi
 
 echo ""
 log "tag 推送成功，ACR 将自动开始构建："
-echo "    <ACR地址>/kintreda/geoflow-app:${VERSION}"
-echo "    <ACR地址>/kintreda/geoflow-web:${VERSION}"
+echo "    <ACR地址>/kintreda/geoflow-app:latest"
+echo "    <ACR地址>/kintreda/geoflow-web:latest"
 echo ""
-echo ">>> 查看构建进度：阿里云控制台 → 容器镜像服务 → ${REMOTE} 实例 → 镜像仓库 → 构建"
-echo ">>> 构建完成后，在部署机的 .env 中锁定版本："
-echo "    GEOFLOW_APP_IMAGE=<ACR地址>/kintreda/geoflow-app:${VERSION}"
-echo "    GEOFLOW_WEB_IMAGE=<ACR地址>/kintreda/geoflow-web:${VERSION}"
+echo ">>> 查看构建进度：阿里云控制台 → 容器镜像服务 → 镜像仓库 → 构建"
+echo ">>> 构建完成后，部署机 .env 中镜像锁定为 latest："
+echo "    GEOFLOW_APP_IMAGE=<ACR地址>/kintreda/geoflow-app:latest"
+echo "    GEOFLOW_WEB_IMAGE=<ACR地址>/kintreda/geoflow-web:latest"
 echo ""
 
 # ---------------------------------------------------------------------------
 # 5. 校验构建产物（可选）
 # ---------------------------------------------------------------------------
-# ACR 内置规则锁死「Dockerfile文件名 = Dockerfile」，两个仓库监听同一 tag 时
-# 会构建出同一个 app 镜像。构建完成后立即校验，避免部署时才发现 web 容器起不来。
+# 自定义规则镜像版本固定为 latest，app/web 各走自己的 Dockerfile。构建完成后
+# 立即校验，避免部署时才发现 web 容器起不来（web 应是 nginx、app 应是 php-fpm）。
 if [[ "${VERIFY:-0}" == "1" ]]; then
   log "等待构建完成并校验产物（VERIFY=1）……"
   log "提示：ACR 构建约需 10-20 分钟，脚本会持续重试"

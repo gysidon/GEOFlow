@@ -1,11 +1,14 @@
 # GEOFlow 生产应用镜像（PHP-FPM + 业务代码）
 #
 # 用途：供阿里云 ACR「代码变更时自动构建镜像」使用。
-# ACR 构建规则填写：
-#   分支/标签：   tags: release-v$version
+# ACR 构建规则填写（自定义规则，避开内置 release-v* 规则）：
+#   分支/标签：   tags: v$version
 #   构建上下文目录： /
 #   Dockerfile文件名： Dockerfile
 #   镜像版本：   $version
+#
+# 注意：composer/php/node 基础镜像已同步至 ACR（kintreda/base-*），
+#       构建时从 ACR 内网拉取，避免 Docker Hub 匿名拉取 429 限流。
 #
 # 与 docker/Dockerfile.prod 的差异：
 #   去掉了 RUN --mount=type=cache（BuildKit 专属语法）。
@@ -14,8 +17,9 @@
 #
 # 上游文件 docker/Dockerfile.prod 保持原样，供服务器本地构建与 GitHub Actions 使用。
 
-ARG COMPOSER_IMAGE=composer:2
-ARG PHP_FPM_IMAGE=php:8.4-fpm-bookworm
+ARG COMPOSER_IMAGE=registry.cn-chengdu.aliyuncs.com/kintreda/base-composer:2
+ARG PHP_FPM_IMAGE=registry.cn-chengdu.aliyuncs.com/kintreda/base-php:8.4-fpm-bookworm
+ARG NODE_IMAGE=registry.cn-chengdu.aliyuncs.com/kintreda/base-node:22-bookworm-slim
 ARG PECL_REDIS_VERSION=6.3.0
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
@@ -85,7 +89,7 @@ RUN mkdir -p \
     --no-scripts \
     && BROADCAST_CONNECTION=null php artisan package:discover --ansi
 
-FROM node:22-bookworm-slim AS assets
+FROM ${NODE_IMAGE} AS assets
 
 WORKDIR /app
 
